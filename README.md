@@ -1,40 +1,69 @@
-# steps to setup cockroachdb via the operator on aws eks, includes some workarounds for 
-#  adding the storageclass ebs-gp3 and fixing the syntax of the certs to work with the 
-#  default operator settings 
-# see https://www.cockroachlabs.com/docs/v26.2/deploy-cockroachdb-with-kubernetes?filters=manual
+# CockroachDB on AWS EKS with Operator
 
+This repository contains steps to deploy CockroachDB using the Cockroach Operator on AWS EKS. It also includes workarounds for adding the `ebs-gp3` StorageClass and fixing secret/tls syntax for the operator.
 
-# pre-req's
+> Based on CockroachDB docs: https://www.cockroachlabs.com/docs/v26.2/deploy-cockroachdb-with-kubernetes?filters=manual
+
+## Prerequisites
+
+Verify your tools:
+
+```bash
 eksctl version
-0.215.0
-
 kubectl version
+```
+
+Example versions:
+
+```text
 Client Version: v1.32.11
 Kustomize Version: v5.5.0
 Server Version: v1.32.13-eks-bbe087e
+```
 
-mkdir eks-ldr; cd eks-ldr
+Create a working directory:
 
-# create cluster 1
+```bash
+mkdir eks-ldr
+cd eks-ldr
+```
+
+## Create cluster
+
+```bash
 export AWS_PROFILE=CRLRevenue-337380398238
 export AWS_REGION=us-east-1
 export CLUSTER1=dlupinski-cockroach-east1
 export REGION1=us-east-1
 
-eksctl create cluster --name $CLUSTER1 --region $REGION1 --nodegroup-name standard-workers --node-type m5.xlarge --nodes 3 
+eksctl create cluster \
+  --name "$CLUSTER1" \
+  --region "$REGION1" \
+  --nodegroup-name standard-workers \
+  --node-type m5.xlarge \
+  --nodes 3
+```
 
-# get context to reference
-kubectl config get-contexts | grep $CLUSTER1
+Get cluster context and namespace:
+
+```bash
+kubectl config get-contexts | grep "$CLUSTER1"
 export CONTEXT1=duane.lupinski@cockroachlabs.com@dlupinski-cockroach-east1.us-east-1.eksctl.io
 
-kubectl create namespace $REGION1 --context $CONTEXT1
+kubectl create namespace "$REGION1" --context "$CONTEXT1"
+```
 
-# certs
+## Generate certificates
+
+```bash
 mkdir certs1 my-safe-directory1
-cockroach cert create-ca --certs-dir=certs1 --ca-key=my-safe-directory1/ca.key 
+cockroach cert create-ca --certs-dir=certs1 --ca-key=my-safe-directory1/ca.key
 cockroach cert create-client root --certs-dir=certs1 --ca-key=my-safe-directory1/ca.key
 
-kubectl create secret generic cockroachdb.client.root --from-file=certs1 --namespace $REGION1 --context=$CONTEXT1
+kubectl create secret generic cockroachdb.client.root \
+  --from-file=certs1 \
+  --namespace "$REGION1" \
+  --context "$CONTEXT1"
 
 cockroach cert create-node \
   localhost 127.0.0.1 cockroachdb-public "cockroachdb-public.$REGION1" \
@@ -43,50 +72,80 @@ cockroach cert create-node \
   --certs-dir=certs1 \
   --ca-key=my-safe-directory1/ca.key
 
-kubectl create secret generic cockroachdb.node --from-file=certs1 --namespace=$REGION1 --context=$CONTEXT1
+kubectl create secret generic cockroachdb.node \
+  --from-file=certs1 \
+  --namespace "$REGION1" \
+  --context "$CONTEXT1"
 
-kubectl get secrets --namespace $REGION1
+kubectl get secrets --namespace "$REGION1" --context "$CONTEXT1"
+```
 
-# using the operator
-kubectl apply -f https://raw.githubusercontent.com/cockroachdb/cockroach-operator/v2.18.3/install/crds.yaml -n "$REGION1" --context "$CONTEXT1"
+## Install the Cockroach Operator
 
-# steps to resolve EBS CSI Driver
-# pre-reqs
+```bash
+kubectl apply -f https://raw.githubusercontent.com/cockroachdb/cockroach-operator/v2.18.3/install/crds.yaml \
+  -n "$REGION1" --context "$CONTEXT1"
+```
+
+## Resolve EBS CSI Driver issues
+
+Set variables for your cluster:
+
+```bash
 CLUSTER_NAME=<your-cluster-name>
 REGION=us-east-1
+```
 
-# Get node group name
+Get the nodegroup name:
+
+```bash
 aws eks list-nodegroups \
-  --cluster-name $CLUSTER_NAME \
-  --region $REGION
+  --cluster-name "$CLUSTER_NAME" \
+  --region "$REGION"
+```
 
-# Get the node IAM role name
+Get the node IAM role:
+
+```bash
 NODE_ROLE=$(aws eks describe-nodegroup \
-  --cluster-name $CLUSTER_NAME \
+  --cluster-name "$CLUSTER_NAME" \
   --nodegroup-name standard-workers \
-  --region $REGION \
+  --region "$REGION" \
   --query "nodegroup.nodeRole" \
   --output text | cut -d'/' -f2)
 
 echo "Node role: $NODE_ROLE"
+```
 
-# Attach the AWS-managed EBS CSI policy
+Attach the AWS-managed EBS CSI policy:
+
+```bash
 aws iam attach-role-policy \
-  --role-name $NODE_ROLE \
+  --role-name "$NODE_ROLE" \
   --policy-arn arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy
+```
 
-# Remove existing broken addon if present
+Remove an existing broken addon (if present):
+
+```bash
 eksctl delete addon \
   --name aws-ebs-csi-driver \
-  --cluster $CLUSTER_NAME \
-  --region $REGION
+  --cluster "$CLUSTER_NAME" \
+  --region "$REGION"
+```
 
-# Install fresh — no --service-account-role-arn (uses node instance profile)
+Install the addon fresh:
+
+```bash
 eksctl create addon \
   --name aws-ebs-csi-driver \
-  --cluster $CLUSTER_NAME \
-  --region $REGION
+  --cluster "$CLUSTER_NAME" \
+  --region "$REGION"
+```
 
+Create the `ebs-gp3` StorageClass:
+
+```bash
 cat <<EOF | kubectl apply -f -
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
@@ -100,20 +159,31 @@ volumeBindingMode: WaitForFirstConsumer
 reclaimPolicy: Retain
 allowVolumeExpansion: true
 EOF
+```
 
-# Set ebs-gp3 as default
+Set `ebs-gp3` as the default storage class:
+
+```bash
 kubectl patch storageclass ebs-gp3 \
   -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
 
-# Remove default from legacy gp2
 kubectl patch storageclass gp2 \
   -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"false"}}}'
+```
 
-# Verify
+Verify the storage classes:
+
+```bash
 kubectl get storageclass
-# Expected: ebs-gp3 (default)   ebs.csi.aws.com   WaitForFirstConsumer
+```
 
-# update crdbcluster yaml:
+Expected output includes `ebs-gp3 (default)`.
+
+## Update CockroachDB cluster manifest
+
+Ensure your `CrdbCluster` YAML uses `ebs-gp3`:
+
+```yaml
 spec:
   dataStore:
     pvc:
@@ -124,72 +194,83 @@ spec:
           requests:
             storage: "60Gi"
         volumeMode: Filesystem
-        storageClassName: ebs-gp3    # ← required
+        storageClassName: ebs-gp3
+```
 
-# fix tls secret names (used incorrect convention (see above) for deploying via operator)
-# --- cockroachdb.node ---
-kubectl get secret cockroachdb.node -n "$REGION1" -o json | jq -r '.data["node.crt"]' | base64 -d > /tmp/node.crt
-kubectl get secret cockroachdb.node -n "$REGION1" -o json | jq -r '.data["node.key"]' | base64 -d > /tmp/node.key
-kubectl get secret cockroachdb.node -n "$REGION1" -o json | jq -r '.data["ca.crt"]'   | base64 -d > /tmp/ca.crt
+## Fix TLS secret naming for the operator
 
-kubectl delete secret cockroachdb.node -n "$REGION1"
+The operator expects `tls.crt`, `tls.key`, and `ca.crt` in secrets.
+
+### Fix `cockroachdb.node`
+
+```bash
+kubectl get secret cockroachdb.node -n "$REGION1" --context "$CONTEXT1" -o json | jq -r '.data["node.crt"]' | base64 -d > /tmp/node.crt
+kubectl get secret cockroachdb.node -n "$REGION1" --context "$CONTEXT1" -o json | jq -r '.data["node.key"]' | base64 -d > /tmp/node.key
+kubectl get secret cockroachdb.node -n "$REGION1" --context "$CONTEXT1" -o json | jq -r '.data["ca.crt"]' | base64 -d > /tmp/ca.crt
+
+kubectl delete secret cockroachdb.node -n "$REGION1" --context "$CONTEXT1"
 kubectl create secret generic cockroachdb.node \
   --from-file=tls.crt=/tmp/node.crt \
   --from-file=tls.key=/tmp/node.key \
   --from-file=ca.crt=/tmp/ca.crt \
-  -n "$REGION1"
+  -n "$REGION1" --context "$CONTEXT1"
+```
 
-# --- cockroachdb.client.root ---
-kubectl get secret cockroachdb.client.root -n "$REGION1" -o json | jq -r '.data["client.root.crt"]' | base64 -d > /tmp/client.root.crt
-kubectl get secret cockroachdb.client.root -n "$REGION1" -o json | jq -r '.data["client.root.key"]' | base64 -d > /tmp/client.root.key
-kubectl get secret cockroachdb.client.root -n "$REGION1" -o json | jq -r '.data["ca.crt"]'           | base64 -d > /tmp/client-ca.crt
+### Fix `cockroachdb.client.root`
 
-kubectl delete secret cockroachdb.client.root -n "$REGION1"
+```bash
+kubectl get secret cockroachdb.client.root -n "$REGION1" --context "$CONTEXT1" -o json | jq -r '.data["client.root.crt"]' | base64 -d > /tmp/client.root.crt
+kubectl get secret cockroachdb.client.root -n "$REGION1" --context "$CONTEXT1" -o json | jq -r '.data["client.root.key"]' | base64 -d > /tmp/client.root.key
+kubectl get secret cockroachdb.client.root -n "$REGION1" --context "$CONTEXT1" -o json | jq -r '.data["ca.crt"]' | base64 -d > /tmp/client-ca.crt
+
+kubectl delete secret cockroachdb.client.root -n "$REGION1" --context "$CONTEXT1"
 kubectl create secret generic cockroachdb.client.root \
   --from-file=tls.crt=/tmp/client.root.crt \
   --from-file=tls.key=/tmp/client.root.key \
   --from-file=ca.crt=/tmp/client-ca.crt \
-  -n "$REGION1"
+  -n "$REGION1" --context "$CONTEXT1"
+```
 
-# IF NEEDED - clean up and redeploy
-# Delete stuck PVCs
+## Redeploy if needed
+
+```bash
 kubectl delete pvc \
   datadir-cockroachdb-0 \
   datadir-cockroachdb-1 \
   datadir-cockroachdb-2 \
   -n "$REGION1"
 
-# Delete StatefulSet (operator will recreate it)
 kubectl delete statefulset cockroachdb -n "$REGION1"
-
-# Apply updated CrdbCluster manifest
 kubectl apply -f crdb-us-east-1.yaml -n "$REGION1"
 
-# Watch everything come up
 kubectl get pods -n "$REGION1" -w
-kubectl get pvc  -n "$REGION1" -w
-    
-# Verify all pods are healthy (controller should show 6/6)
+kubectl get pvc -n "$REGION1" -w
+```
+
+Verify EBS CSI components:
+
+```bash
 kubectl get pods -n kube-system | grep ebs-csi
+```
 
-# download and change the namespace references accordingly
+## Install operator and example resources
+
+```bash
 curl -O https://raw.githubusercontent.com/cockroachdb/cockroach-operator/v2.18.3/install/operator.yaml
-
-mv operator.yaml operator-us-east-1.yaml 
-
+mv operator.yaml operator-us-east-1.yaml
 kubectl apply -f operator-us-east-1.yaml -n "$REGION1" --context "$CONTEXT1"
 
-# confirm the operator pod is running via:
-kubectl get pods -n "$REGION1" --context "$CONTEXT1"
-
-# download example.yaml, rename and update, then create statefulset
 curl -O https://raw.githubusercontent.com/cockroachdb/cockroach-operator/v2.18.3/examples/example.yaml
+mv example.yaml crdb-us-east-1.yaml
+kubectl apply -f crdb-us-east-1.yaml -n "$REGION1" --context "$CONTEXT1"
 
-mv example crdb-us-east-1.yaml
+curl https://raw.githubusercontent.com/cockroachdb/cockroach-operator/v2.18.3/examples/client-secure-operator.yaml > client-secure-operator.yaml
+kubectl apply -f client-secure-operator.yaml -n "$REGION1" --context "$CONTEXT1"
+```
 
-kubectl apply -f crdb-us-east-1.yaml -n $REGION1 --context $CONTEXT1
+Run the built-in client:
 
-# get built-in client - update keys accordingly
-kubectl create -f https://raw.githubusercontent.com/cockroachdb/cockroach-operator/v2.18.3/examples/client-secure-operator.yaml
-
-kubectl exec -it cockroachdb-client-secure -n $REGION1 --context $CONTEXT1 -- ./cockroach sql --certs-dir=/cockroach/cockroach-certs --host=cockroachdb-public
+```bash
+kubectl exec -it cockroachdb-client-secure -n "$REGION1" --context "$CONTEXT1" -- \
+  ./cockroach sql --certs-dir=/cockroach/cockroach-certs --host=cockroachdb-public
+```
