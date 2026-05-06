@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: crdb-log-config
+data:
+  logs.yaml: |
+    sinks:
+      stderr:
+        channels: [OPS, HEALTH, REPLICATION, DEV]
+        redact: true

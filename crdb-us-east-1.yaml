@@ -20,6 +20,7 @@ metadata:
   # this translates to the name of the statefulset that is created
   name: cockroachdb
 spec:
+  logConfigMap: crdb-log-config
   dataStore:
     pvc:
       spec:
